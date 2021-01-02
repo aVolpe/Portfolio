@@ -41,7 +41,7 @@ class PortfolioCopyWorker(PortfolioWorker):
 
     __gsignals__ = {
         "started": (GObject.SignalFlags.RUN_LAST, None, (int,)),
-        "updated": (GObject.SignalFlags.RUN_LAST, None, (str, bool, int, int)),
+        "updated": (GObject.SignalFlags.RUN_LAST, None, (str, bool, bool, int, int)),
         "finished": (GObject.SignalFlags.RUN_LAST, None, (int,)),
         "failed": (GObject.SignalFlags.RUN_LAST, None, (str,)),
     }
@@ -52,24 +52,43 @@ class PortfolioCopyWorker(PortfolioWorker):
         self._directory = directory
 
     def run(self):
-        total = len(self._selection)
+        paths = {}
+        renames = {}
+
+        for path, ref in self._selection:
+            for _path in utils.flatten_walk(path):
+                paths[_path] = path
+
+        total = len(paths)
         self.emit("started", total)
 
-        for index, (path, ref) in enumerate(self._selection):
-            name = os.path.basename(path)
-            destination = os.path.join(self._directory, name)
+        for index, path in enumerate(paths.keys()):
+            parent = paths.get(path)
+            posfix = path.replace(f"{os.path.dirname(parent)}{os.path.sep}", "")
+            destination = os.path.join(self._directory, posfix)
+
+            rename = renames.get(parent)
+            if rename is not None:
+                destination = destination.replace(parent, rename)
+
+            parent = os.path.dirname(destination)
             overwritten = os.path.exists(destination)
+            ignore = paths.get(path) != path
 
             if path == destination:
+                name = os.path.basename(destination)
                 name = utils.find_new_name(self._directory, name)
                 destination = os.path.join(self._directory, name)
+                renames[path] = destination
                 overwritten = False
 
             try:
+                if overwritten and os.path.isdir(destination):
+                    shutil.rmtree(destination)
+                if not os.path.exists(parent):
+                    os.makedirs(parent)
                 if os.path.isdir(path):
-                    if overwritten and os.path.isdir(path):
-                        shutil.rmtree(destination)
-                    shutil.copytree(path, destination)
+                    os.makedirs(destination)
                 else:
                     shutil.copyfile(path, destination)
             except Exception as e:
@@ -77,7 +96,7 @@ class PortfolioCopyWorker(PortfolioWorker):
                 self.emit("failed", destination)
                 return
             else:
-                self.emit("updated", destination, overwritten, index, total)
+                self.emit("updated", destination, overwritten, ignore, index, total)
 
         self.emit("finished", total)
 
@@ -86,26 +105,51 @@ class PortfolioCutWorker(PortfolioCopyWorker):
     __gtype_name__ = "PortfolioCutWorker"
 
     def run(self):
-        total = len(self._selection)
+        paths = {}
+
+        for path, ref in self._selection:
+            for _path in utils.flatten_walk(path):
+                paths[_path] = path
+
+        total = len(paths)
         self.emit("started", total)
 
-        for index, (path, ref) in enumerate(self._selection):
-            name = os.path.basename(path)
-            destination = os.path.join(self._directory, name)
+        last_top_parent = None
+        for index, path in enumerate(paths.keys()):
+            top_parent = paths.get(path)
+            posfix = path.replace(f"{os.path.dirname(top_parent)}{os.path.sep}", "")
+            destination = os.path.join(self._directory, posfix)
+
+            parent = os.path.dirname(destination)
             overwritten = os.path.exists(destination)
+            ignore = paths.get(path) != path
 
             try:
-                if destination == path:
+                if path == destination:
                     continue
-                if overwritten and os.path.isdir(path):
-                    shutil.rmtree(destination)
-                shutil.move(path, destination)
+                if not os.path.exists(parent):
+                    os.makedirs(parent)
+
+                if os.path.isdir(path):
+                    os.makedirs(destination)
+                else:
+                    shutil.move(path, destination)
+
+                if (
+                    last_top_parent is not None
+                    and os.path.isdir(last_top_parent)
+                    and top_parent != last_top_parent
+                ):
+                    shutil.rmtree(last_top_parent)
+                if index == total - 1 and os.path.isdir(top_parent):
+                    shutil.rmtree(top_parent)
             except Exception as e:
                 logger.debug(e)
                 self.emit("failed", path)
                 return
             else:
-                self.emit("updated", destination, overwritten, index, total)
+                self.emit("updated", destination, overwritten, ignore, index, total)
+                last_top_parent = top_parent
 
         self.emit("finished", total)
 
